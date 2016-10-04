@@ -10,23 +10,20 @@ import org.springframework.stereotype.Controller;
 import org.springframework.validation.BindingResult;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.servlet.ModelAndView;
 import ru.znamenka.jpa.model.User;
 import ru.znamenka.represent.CalendarEvent;
 import ru.znamenka.represent.domain.ClientApi;
 import ru.znamenka.represent.domain.TrainingApi;
-import ru.znamenka.represent.page.schedule.SubscriptionApi;
 import ru.znamenka.service.ApiStore;
-import ru.znamenka.service.client.ClientService;
-import ru.znamenka.service.page.schedule.ScheduleLoadService;
-import ru.znamenka.service.page.schedule.SubscriptionPageService;
+import ru.znamenka.service.subsystem.client.ClientService;
+import ru.znamenka.service.subsystem.training.EventService;
 
 import javax.validation.Valid;
 import java.sql.Date;
+import java.sql.Timestamp;
 import java.util.List;
 
-import static java.util.Collections.emptyList;
 import static org.springframework.http.MediaType.APPLICATION_JSON_VALUE;
 import static org.springframework.http.ResponseEntity.badRequest;
 import static org.springframework.http.ResponseEntity.ok;
@@ -34,14 +31,12 @@ import static org.springframework.util.Assert.notNull;
 import static org.springframework.web.bind.annotation.RequestMethod.POST;
 
 @Controller
-@RequestMapping("/schedule")
+@RequestMapping("/training")
 public class ScheduleController {
 
     private final ApiStore service;
 
-    private final SubscriptionPageService pageService;
-
-    private final ScheduleLoadService eventsService;
+    private final EventService eventService;
 
     private final SimpMessageSendingOperations mesTemplate;
 
@@ -49,19 +44,16 @@ public class ScheduleController {
 
     @Autowired
     public ScheduleController(
-            SubscriptionPageService pageService,
+            EventService eventService,
             @Qualifier("dataService") ApiStore service,
-            ScheduleLoadService eventsService,
             SimpMessageSendingOperations mesTemplate,
             ClientService clientService) {
-        notNull(pageService);
+        notNull(eventService);
         notNull(service);
-        notNull(eventsService);
         notNull(mesTemplate);
         notNull(clientService);
-        this.pageService = pageService;
+        this.eventService = eventService;
         this.service = service;
-        this.eventsService = eventsService;
         this.mesTemplate = mesTemplate;
         this.clientService = clientService;
     }
@@ -76,25 +68,13 @@ public class ScheduleController {
     public ModelAndView getSchedulePage() {
         ModelAndView mv = new ModelAndView("schedule");
         List<ClientApi> list = clientService.activeClients();
+        mv.addObject("clientNew", ClientApi.empty());
         mv.addObject("clients", list);
         mv.addObject("training", TrainingApi.empty());
         return mv;
     }
 
-    /**
-     * API для подгрузки абонементов клиента по его id
-     *
-     * @param clientId уникальный идентификатор клиента
-     * @return список абонементов
-     */
-    @GetMapping("/subscriptions")
-    public ResponseEntity<List<SubscriptionApi>> getSubscriptions(@RequestParam("clientId") Long clientId) {
-        if (clientId == null) {
-            return badRequest().body(emptyList());
-        }
-        List<SubscriptionApi> subscriptions = pageService.getSubscriptionByClientId(clientId);
-        return ok(subscriptions);
-    }
+
 
     /**
      * API для бронивания тренировки для пользователя.
@@ -108,7 +88,7 @@ public class ScheduleController {
      * @return 200 если тренировка успешно забронирована, 400 в ином случае
      */
     @RequestMapping(
-            path = "/",
+            path = "club-client",
             method = POST,
             consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE + "; charset:utf-8",
             produces = APPLICATION_JSON_VALUE
@@ -118,7 +98,7 @@ public class ScheduleController {
         if (!bindingResult.hasErrors()) {
             training.setStatusId(1L);
             training.setTrainerId(training.getTrainerId() != null ? training.getTrainerId() : getTrainerIdIfExists());
-            pageService.postToCalendar(training);
+            eventService.postToCalendar(training);
 
             CalendarEvent event = new CalendarEvent("Занято", training.getStart(), training.getEnd());
             mesTemplate.convertAndSend("/calendar/event", event);
@@ -126,7 +106,18 @@ public class ScheduleController {
             return ok(training);
         }
         return badRequest().body(training);
+    }
 
+    @RequestMapping(path = "new-client", method = POST)
+    public ResponseEntity<TrainingApi> bookTraining(@Valid ClientApi client, Timestamp startTraining, BindingResult br) {
+        if (br.hasErrors()) return badRequest().body(TrainingApi.empty());
+        client = clientService.store().save(ClientApi.class, client);
+        TrainingApi training = new TrainingApi();
+        training.setClientId(client.getId());
+        training.setStart(startTraining);
+        training.setStatusId(1L);
+
+        return ok(training);
     }
 
     /**
@@ -139,7 +130,7 @@ public class ScheduleController {
      */
     @GetMapping(path = "/events", produces = APPLICATION_JSON_VALUE)
     public ResponseEntity<List<CalendarEvent>> events(Date start, Date end) {
-        return ok(eventsService.loadEvents(start, end));
+        return ok(eventService.loadEvents(start, end));
     }
 
     /**
@@ -150,7 +141,7 @@ public class ScheduleController {
      */
     @GetMapping(path = "/events/busy", produces = APPLICATION_JSON_VALUE)
     public ResponseEntity<List<CalendarEvent>> eventsBusy(Date start, Date end) {
-        return ok(eventsService.loadEventsBusy(start, end));
+        return ok(eventService.loadEventsBusy(start, end));
     }
 
     /**
